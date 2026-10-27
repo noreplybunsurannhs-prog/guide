@@ -13,7 +13,6 @@
 
     <script src="https://unpkg.com/dexie@latest/dist/dexie.js"></script>
     <script src="https://unpkg.com/html5-qrcode"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
     <style>
         body { font-family: -apple-system, sans-serif; margin: 10px; background: #f8f9fa; color: #333; touch-action: manipulation; }
         .header { text-align: center; margin-bottom: 15px; }
@@ -57,12 +56,6 @@
 
         #toast-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; z-index: 10000; backdrop-filter: blur(3px); }
         .toast-box { background: white; color: #333; padding: 22px; border-radius: 16px; width: 85%; max-width: 320px; text-align: center; box-shadow: 0 8px 25px rgba(0,0,0,0.3); }
-
-        #debugConsole {
-            background: #1e1e1e; color: #00ff66; font-family: monospace; font-size: 11px;
-            padding: 10px; border-radius: 8px; max-height: 120px; overflow-y: auto;
-            margin-top: 10px; text-align: left; display: none; word-break: break-all;
-        }
 
         #installBanner {
             display: none; background: #dc3545; color: white; padding: 10px; 
@@ -118,18 +111,17 @@
 
     <div class="card" style="text-align: center;">
         <h3>Database Sync</h3>
-        <button id="syncRosterBtn" class="btn-sync" onclick="syncRoster()">🔄 Fetch Latest Google Sheet Data</button>
-        <div id="debugConsole"></div>
+        <button id="syncRosterBtn" class="btn-sync" onclick="syncRoster()">📥 Sync Roster from Sheet</button>
         <hr style="margin: 15px 0; border: 0; border-top: 1px solid #eee;">
         <input type="file" id="csvFile" accept=".csv" style="font-size: 11px; margin-bottom:10px;">
         <button class="btn-secondary" onclick="uploadCSV()">Import Local CSV File</button>
     </div>
 
     <script>
-        const PUBLISHED_KEY = "2PACX-1vRiNJ2cC86hHefg8sqPRogUQlVw5Zu9oXvkLvZLvj9i8VaMMoID9wfe1svMT7CWDVWtMWAzUkxAHsKH";
-        const DIRECT_CSV_URL = `https://docs.google.com/spreadsheets/d/e/${PUBLISHED_KEY}/pub?output=csv`;
+        // --- PUBLISHED GOOGLE SHEET URL ---
+        const ROSTER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRiNJ2cC86hHefg8sqPRogUQlVw5Zu9oXvkLvZLvj9i8VaMMoID9wfe1svMT7CWDVWtMWAzUkxAHsKH/pub?output=csv";
 
-        // --- PWA SETUP ---
+        // --- PWA SERVICE WORKER (EXCLUDES GOOGLE SHEET URLS FROM CACHE) ---
         (function setupPWA() {
             const manifestData = {
                 name: "Emergency Student Finder",
@@ -152,12 +144,11 @@
 
             if ('serviceWorker' in navigator) {
                 const swCode = `
-                    const CACHE_NAME = 'emergency-finder-v2';
+                    const CACHE_NAME = 'emergency-finder-v3';
                     const ASSETS = [
                         './',
                         'https://unpkg.com/dexie@latest/dist/dexie.js',
-                        'https://unpkg.com/html5-qrcode',
-                        'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js'
+                        'https://unpkg.com/html5-qrcode'
                     ];
 
                     self.addEventListener('install', (e) => {
@@ -178,7 +169,8 @@
                     });
 
                     self.addEventListener('fetch', (e) => {
-                        if (e.request.url.includes('docs.google.com') || e.request.url.includes('proxy')) {
+                        // Skip network requests to Google Sheets from cache interceptor
+                        if (e.request.url.includes('docs.google.com') || e.request.url.includes('script.google.com')) {
                             return;
                         }
                         e.respondWith(
@@ -228,20 +220,6 @@
         let isScannerActive = false;
         let audioCtx = null;
 
-        function logDebug(msg) {
-            const el = document.getElementById('debugConsole');
-            if (el) {
-                el.style.display = 'block';
-                el.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
-                el.scrollTop = el.scrollHeight;
-            }
-        }
-
-        function clearDebug() {
-            const el = document.getElementById('debugConsole');
-            if (el) { el.innerHTML = ''; el.style.display = 'none'; }
-        }
-
         function showNotify(msg) {
             document.getElementById('toast-msg').innerText = msg;
             document.getElementById('toast-overlay').style.display = "flex";
@@ -271,7 +249,7 @@
         document.addEventListener("DOMContentLoaded", async () => {
             await refreshUI();
             if (navigator.onLine) {
-                syncRoster(true);
+                syncRoster(true); // Auto sync silently on startup when online
             }
         });
 
@@ -282,98 +260,115 @@
                 : `⚠️ NO DATABASE LOADED. Fetch from Google Sheets or Upload CSV below.`;
         }
 
-        function parseAndStoreCSV(csvText) {
-            return new Promise((resolve) => {
-                Papa.parse(csvText, {
-                    skipEmptyLines: true,
-                    complete: async function(results) {
-                        if (!results || !results.data || results.data.length < 2) {
-                            resolve(0);
-                            return;
-                        }
+        // Quote-aware CSV parser from working tracker
+        function parseCSV(text) {
+            const lines = [];
+            let row = [];
+            let current = '';
+            let inQuotes = false;
 
-                        const rows = results.data;
-                        const headers = rows[0].map(h => String(h || '').toLowerCase().trim());
+            for (let i = 0; i < text.length; i++) {
+                const char = text[i];
+                const nextChar = text[i + 1];
 
-                        const lrnIdx = headers.findIndex(h => h.includes('lrn'));
-                        const nameIdx = headers.findIndex(h => h.includes('name'));
-                        const gradeIdx = headers.findIndex(h => h.includes('grade') || h.includes('level'));
-                        const secIdx = headers.findIndex(h => h.includes('section'));
-
-                        const students = [];
-                        for (let i = 1; i < rows.length; i++) {
-                            const r = rows[i];
-                            const lrn = lrnIdx !== -1 && r[lrnIdx] ? String(r[lrnIdx]).trim() : String(r[0] || '').trim();
-                            const name = nameIdx !== -1 && r[nameIdx] ? String(r[nameIdx]).trim() : String(r[1] || '').trim();
-                            const grade = gradeIdx !== -1 && r[gradeIdx] ? String(r[gradeIdx]).trim() : (r[2] ? String(r[2]).trim() : 'N/A');
-                            const sec = secIdx !== -1 && r[secIdx] ? String(r[secIdx]).trim() : (r[3] ? String(r[3]).trim() : 'N/A');
-
-                            if (lrn && lrn.toUpperCase() !== 'LRN' && name) {
-                                students.push({ LRN: lrn, Name: name, Grade: grade, Section: sec });
-                            }
-                        }
-
-                        if (students.length > 0) {
-                            await db.students.clear();
-                            await db.students.bulkPut(students);
-                            await refreshUI();
-                        }
-                        resolve(students.length);
+                if (char === '"') {
+                    if (inQuotes && nextChar === '"') {
+                        current += '"';
+                        i++;
+                    } else {
+                        inQuotes = !inQuotes;
                     }
-                });
-            });
+                } else if (char === ',' && !inQuotes) {
+                    row.push(current.trim());
+                    current = '';
+                } else if ((char === '\r' || char === '\n') && !inQuotes) {
+                    if (char === '\r' && nextChar === '\n') { i++; }
+                    row.push(current.trim());
+                    if (row.length > 0 && row.some(cell => cell.length > 0)) {
+                        lines.push(row);
+                    }
+                    row = [];
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+            if (current || row.length > 0) {
+                row.push(current.trim());
+                if (row.some(cell => cell.length > 0)) lines.push(row);
+            }
+            return lines;
         }
 
         async function syncRoster(silent = false) {
             if (!navigator.onLine) { 
-                if (!silent) showNotify("No Internet Connection. Please connect to sync."); 
+                if (!silent) showNotify("No Internet Connection. Please go online to sync the roster."); 
                 return; 
             }
 
-            clearDebug();
             const btn = document.getElementById('syncRosterBtn');
-            if (btn) { btn.disabled = true; btn.innerText = "Syncing Roster... ⏳"; }
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "Syncing Roster... ⏳";
+            }
 
-            let loadedCount = 0;
-
-            // Strategy 1: CORS Proxy via corsproxy.io
             try {
-                logDebug("Attempting Strategy 1 (corsproxy.io)...");
-                const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(DIRECT_CSV_URL)}`, { cache: "no-cache" });
-                const text = await res.text();
-                if (text.includes("<!DOCTYPE") || text.includes("<html")) {
-                    logDebug("Strategy 1 returned HTML (sheet may be restricted/unpublished).");
-                } else {
-                    loadedCount = await parseAndStoreCSV(text);
-                    if (loadedCount > 0) logDebug(`Strategy 1 Success: Loaded ${loadedCount} records.`);
+                if (scanner && scanner.getState() === Html5QrcodeScannerState.SCANNING) {
+                    await stopScanner();
+                    isScannerActive = false;
+                    document.getElementById('startBtn').style.display = 'block';
                 }
-            } catch(e) {
-                logDebug("Strategy 1 failed: " + e.message);
-            }
 
-            // Strategy 2: CodeTabs Proxy
-            if (loadedCount === 0) {
-                try {
-                    logDebug("Attempting Strategy 2 (codetabs)...");
-                    const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(DIRECT_CSV_URL)}`, { cache: "no-cache" });
-                    const text = await res.text();
-                    if (!text.includes("<!DOCTYPE") && !text.includes("<html")) {
-                        loadedCount = await parseAndStoreCSV(text);
-                        if (loadedCount > 0) logDebug(`Strategy 2 Success: Loaded ${loadedCount} records.`);
+                const response = await fetch(ROSTER_CSV_URL);
+                if (!response.ok) throw new Error("Failed to download CSV");
+
+                const csvText = await response.text();
+                const rows = parseCSV(csvText);
+
+                if (rows.length < 2) {
+                    if (!silent) showNotify("No valid student data found in Google Sheet CSV.");
+                    return;
+                }
+
+                const headers = rows[0].map(h => h.toLowerCase());
+                const lrnIndex = headers.findIndex(h => h.includes('lrn'));
+                const nameIndex = headers.findIndex(h => h.includes('name'));
+                const gradeIndex = headers.findIndex(h => h.includes('grade') || h.includes('level'));
+                const sectionIndex = headers.findIndex(h => h.includes('section'));
+
+                if (lrnIndex === -1 || nameIndex === -1) {
+                    if (!silent) showNotify("CSV headers must contain LRN and NAME.");
+                    return;
+                }
+
+                const students = [];
+                for (let i = 1; i < rows.length; i++) {
+                    const cleanCols = rows[i];
+                    if (cleanCols[lrnIndex] && cleanCols[nameIndex]) {
+                        students.push({
+                            LRN: cleanCols[lrnIndex],
+                            Name: cleanCols[nameIndex],
+                            Grade: (gradeIndex !== -1 && cleanCols[gradeIndex]) ? cleanCols[gradeIndex] : 'N/A',
+                            Section: (sectionIndex !== -1 && cleanCols[sectionIndex]) ? cleanCols[sectionIndex] : 'N/A'
+                        });
                     }
-                } catch(e) {
-                    logDebug("Strategy 2 failed: " + e.message);
                 }
-            }
 
-            // Finish up
-            if (btn) { btn.disabled = false; btn.innerText = "🔄 Fetch Latest Google Sheet Data"; }
-
-            if (loadedCount > 0) {
-                if (!silent) showNotify(`Successfully updated roster! Loaded ${loadedCount} students.`);
-            } else {
-                if (!silent) {
-                    showNotify("Unable to sync Google Sheet.\n\nMake sure your Google Sheet is set to 'File > Share > Publish to Web' with 'Require viewers to sign in' UNCHECKED.");
+                if (students.length > 0) {
+                    await db.students.clear();
+                    await db.students.bulkPut(students);
+                    if (!silent) showNotify(`Successfully updated roster! Loaded ${students.length} students.`);
+                    await refreshUI();
+                } else {
+                    if (!silent) showNotify("No valid student records extracted from Google Sheet CSV.");
+                }
+            } catch (err) {
+                console.error(err);
+                if (!silent) showNotify("Failed to fetch roster CSV. Please verify network connection.");
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "📥 Sync Roster from Sheet";
                 }
             }
         }
@@ -475,11 +470,40 @@
 
             const reader = new FileReader();
             reader.onload = async (e) => {
-                const count = await parseAndStoreCSV(e.target.result);
-                if (count > 0) {
-                    quickShow(`Loaded ${count} students!`);
+                const text = e.target.result;
+                const rows = parseCSV(text);
+                
+                if (rows.length < 2) {
+                    quickShow("CSV file is empty or invalid.");
+                    return;
+                }
+
+                const headers = rows[0].map(h => h.toLowerCase());
+                const lrnIndex = headers.findIndex(h => h.includes('lrn'));
+                const nameIndex = headers.findIndex(h => h.includes('name'));
+                const gradeIndex = headers.findIndex(h => h.includes('grade') || h.includes('level'));
+                const sectionIndex = headers.findIndex(h => h.includes('section'));
+
+                const students = [];
+                for (let i = 1; i < rows.length; i++) {
+                    const cleanCols = rows[i];
+                    if (cleanCols[lrnIndex] && cleanCols[nameIndex]) {
+                        students.push({
+                            LRN: cleanCols[lrnIndex],
+                            Name: cleanCols[nameIndex],
+                            Grade: (gradeIndex !== -1 && cleanCols[gradeIndex]) ? cleanCols[gradeIndex] : 'N/A',
+                            Section: (sectionIndex !== -1 && cleanCols[sectionIndex]) ? cleanCols[sectionIndex] : 'N/A'
+                        });
+                    }
+                }
+
+                if (students.length > 0) {
+                    await db.students.clear();
+                    await db.students.bulkPut(students);
+                    quickShow(`Loaded ${students.length} students!`);
+                    refreshUI();
                 } else {
-                    quickShow("No valid students found in file.");
+                    quickShow("No valid students found in CSV.");
                 }
             };
             reader.readAsText(file);
