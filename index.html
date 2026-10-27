@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <title>S.M.A.R.T. - Emergency Roster Lookup</title>
+    
+    <!-- PWA / Mobile Web App Meta Tags -->
+    <meta name="theme-color" content="#dc3545">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Emergency Finder">
+
+    <script src="https://unpkg.com/dexie@latest/dist/dexie.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; margin: 10px; background: #f8f9fa; color: #333; touch-action: manipulation; }
+        .header { text-align: center; margin-bottom: 15px; }
+        .header h1 { font-size: 1.4em; color: #dc3545; margin: 0; letter-spacing: 1px; }
+        .header p { font-size: 0.85em; color: #666; margin: 2px 0 10px 0; }
+        
+        .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        h3 { margin-top: 0; font-size: 1.1em; border-bottom: 1px solid #eee; padding-bottom: 8px; color: #dc3545; text-align: center; }
+        button { width: 100%; border: none; padding: 12px; border-radius: 8px; font-weight: bold; margin: 5px 0; font-size: 14px; cursor: pointer; transition: opacity 0.2s; }
+        button:active { opacity: 0.7; }
+        button:disabled { background: #ccc !important; color: #666 !important; cursor: not-allowed; opacity: 0.6; }
+        
+        .btn-primary { background: #dc3545; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-sync { background: #28a745; color: white; }
+        
+        #quick-toast { 
+            position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); 
+            background: rgba(0,0,0,0.85); color: white; padding: 16px 30px; 
+            border-radius: 50px; font-size: 16px; font-weight: bold;
+            display: none; z-index: 9999; box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            text-align: center; min-width: 200px;
+        }
+
+        #reader { width: 100%; max-width: 350px; aspect-ratio: 1/1; border-radius: 12px; background: #000; margin: 0 auto; overflow: hidden; }
+        #reader #reader__scan_region { border: none !important; }
+        #reader #reader__scan_region img { display: none !important; }
+        #reader video { object-fit: cover !important; width: 100% !important; height: 100% !important; }
+
+        .result-card { background: #fff3f3; padding: 20px; border-radius: 12px; margin-top: 15px; border: 2px solid #dc3545; text-align: center; }
+        .result-card .name { font-size: 22px; font-weight: bold; color: #111; margin: 8px 0; }
+        .result-card .badge { display: inline-block; background: #dc3545; color: white; padding: 6px 16px; border-radius: 20px; font-weight: bold; font-size: 16px; margin-top: 5px; }
+
+        #status { font-weight: bold; margin-bottom: 10px; padding: 10px; border-radius: 8px; text-align: center; font-size: 12px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+        
+        .search-row { display: flex; gap: 5px; margin-bottom: 10px; justify-content: center; }
+        .search-row input { flex: 1; max-width: 250px; padding: 12px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; text-align: center; }
+        
+        #searchList { max-height: 220px; overflow-y: auto; background: #f8f9fa; border-radius: 8px; margin-bottom: 10px; display: none; border: 1px solid #ddd; }
+        .search-item { padding: 12px; border-bottom: 1px solid #eee; display: flex; flex-direction: column; align-items: center; text-align: center; cursor: pointer; }
+
+        #toast-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; z-index: 10000; backdrop-filter: blur(3px); }
+        .toast-box { background: white; color: #333; padding: 22px; border-radius: 16px; width: 85%; max-width: 320px; text-align: center; box-shadow: 0 8px 25px rgba(0,0,0,0.3); }
+
+        #debugConsole {
+            background: #1e1e1e; color: #00ff66; font-family: monospace; font-size: 11px;
+            padding: 10px; border-radius: 8px; max-height: 120px; overflow-y: auto;
+            margin-top: 10px; text-align: left; display: none; word-break: break-all;
+        }
+
+        #installBanner {
+            display: none; background: #dc3545; color: white; padding: 10px; 
+            border-radius: 8px; margin-bottom: 15px; text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="installBanner">
+        <span>Install Emergency Tracker App</span>
+        <button id="installBtn" style="width: auto; padding: 6px 15px; margin-left: 10px; display: inline-block; background: white; color: #dc3545;">Install</button>
+    </div>
+
+    <div class="header">
+        <h1>🚨 EMERGENCY FINDER</h1>
+        <p>Student & Parent Verification System</p>
+    </div>
+
+    <div id="status">Loading...</div>
+
+    <div id="toast-overlay">
+        <div class="toast-box">
+            <p id="toast-msg" style="margin-top:0; font-size:15px; line-height:1.4;"></p>
+            <button class="btn-primary" style="width:auto; min-width:100px; padding: 10px 25px; margin-top:10px;" onclick="hideNotify()">OK</button>
+        </div>
+    </div>
+
+    <div id="quick-toast"></div>
+
+    <div class="card" style="text-align: center;">
+        <h3>Emergency QR Scanner</h3>
+        <button id="startBtn" class="btn-primary" onclick="initScanner()">Open Camera</button>
+        <div id="reader"></div>
+
+        <div id="scanResult" style="display:none;" class="result-card">
+            <span style="font-size: 12px; color: #666; font-weight: bold; letter-spacing: 1px;">STUDENT IDENTIFIED</span>
+            <div class="name" id="nameText">---</div>
+            <div class="badge" id="infoBadge">Grade -- | Section --</div>
+            <p style="margin-top: 10px; font-size: 12px; color: #666;">LRN: <span id="lrnText"></span></p>
+            <button class="btn-secondary" style="margin-top: 15px;" onclick="resetDisplay()">Scan Next Code</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Manual Search</h3>
+        <div class="search-row">
+            <input type="text" id="nameInput" placeholder="Student name..." onkeyup="if(event.key === 'Enter') performSearch()">
+            <button class="btn-primary" style="width:auto;" onclick="performSearch()">🔍</button>
+        </div>
+        <div id="searchList"></div>
+    </div>
+
+    <div class="card" style="text-align: center;">
+        <h3>Database Sync</h3>
+        <button id="syncRosterBtn" class="btn-sync" onclick="syncRoster()">🔄 Fetch Latest Google Sheet Data</button>
+        <div id="debugConsole"></div>
+        <hr style="margin: 15px 0; border: 0; border-top: 1px solid #eee;">
+        <input type="file" id="csvFile" accept=".csv" style="font-size: 11px; margin-bottom:10px;">
+        <button class="btn-secondary" onclick="uploadCSV()">Import Local CSV File</button>
+    </div>
+
+    <script>
+        const PUBLISHED_KEY = "2PACX-1vRiNJ2cC86hHefg8sqPRogUQlVw5Zu9oXvkLvZLvj9i8VaMMoID9wfe1svMT7CWDVWtMWAzUkxAHsKH";
+        const DIRECT_CSV_URL = `https://docs.google.com/spreadsheets/d/e/${PUBLISHED_KEY}/pub?output=csv`;
+
+        // --- PWA SETUP ---
+        (function setupPWA() {
+            const manifestData = {
+                name: "Emergency Student Finder",
+                short_name: "Emergency Finder",
+                start_url: "./",
+                display: "standalone",
+                background_color: "#f8f9fa",
+                theme_color: "#dc3545",
+                icons: [{
+                    src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23dc3545'/><text x='50%' y='65%' font-size='50' font-weight='bold' fill='white' text-anchor='middle'>🚨</text></svg>",
+                    sizes: "192x192 512x512",
+                    type: "image/svg+xml"
+                }]
+            };
+            const manifestBlob = new Blob([JSON.stringify(manifestData)], { type: 'application/json' });
+            const link = document.createElement('link');
+            link.rel = 'manifest';
+            link.href = URL.createObjectURL(manifestBlob);
+            document.head.appendChild(link);
+
+            if ('serviceWorker' in navigator) {
+                const swCode = `
+                    const CACHE_NAME = 'emergency-finder-v2';
+                    const ASSETS = [
+                        './',
+                        'https://unpkg.com/dexie@latest/dist/dexie.js',
+                        'https://unpkg.com/html5-qrcode',
+                        'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js'
+                    ];
+
+                    self.addEventListener('install', (e) => {
+                        e.waitUntil(
+                            caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+                                .then(() => self.skipWaiting())
+                        );
+                    });
+
+                    self.addEventListener('activate', (e) => {
+                        e.waitUntil(
+                            caches.keys().then((keys) => {
+                                return Promise.all(
+                                    keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+                                );
+                            }).then(() => self.clients.claim())
+                        );
+                    });
+
+                    self.addEventListener('fetch', (e) => {
+                        if (e.request.url.includes('docs.google.com') || e.request.url.includes('proxy')) {
+                            return;
+                        }
+                        e.respondWith(
+                            caches.match(e.request).then((cachedResponse) => {
+                                if (cachedResponse) return cachedResponse;
+                                return fetch(e.request).then((networkResponse) => {
+                                    if (networkResponse && networkResponse.status === 200 && e.request.method === 'GET') {
+                                        const clone = networkResponse.clone();
+                                        caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+                                    }
+                                    return networkResponse;
+                                });
+                            })
+                        );
+                    });
+                `;
+                const swBlob = new Blob([swCode], { type: 'application/javascript' });
+                const swUrl = URL.createObjectURL(swBlob);
+                navigator.serviceWorker.register(swUrl).catch(() => {});
+            }
+
+            let deferredPrompt;
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                deferredPrompt = e;
+                const installBanner = document.getElementById('installBanner');
+                if (installBanner) installBanner.style.display = 'block';
+
+                const installBtn = document.getElementById('installBtn');
+                if (installBtn) {
+                    installBtn.addEventListener('click', () => {
+                        installBanner.style.display = 'none';
+                        deferredPrompt.prompt();
+                        deferredPrompt.userChoice.then(() => { deferredPrompt = null; });
+                    });
+                }
+            });
+        })();
+
+        // --- DATABASE SETUP ---
+        const db = new Dexie("EmergencyStudentDB");
+        db.version(1).stores({
+            students: "LRN, Name, Grade, Section"
+        });
+
+        let scanner = null;
+        let isScannerActive = false;
+        let audioCtx = null;
+
+        function logDebug(msg) {
+            const el = document.getElementById('debugConsole');
+            if (el) {
+                el.style.display = 'block';
+                el.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+                el.scrollTop = el.scrollHeight;
+            }
+        }
+
+        function clearDebug() {
+            const el = document.getElementById('debugConsole');
+            if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+        }
+
+        function showNotify(msg) {
+            document.getElementById('toast-msg').innerText = msg;
+            document.getElementById('toast-overlay').style.display = "flex";
+        }
+        function hideNotify() { document.getElementById('toast-overlay').style.display = "none"; }
+
+        function quickShow(msg) {
+            const el = document.getElementById('quick-toast');
+            el.innerText = msg;
+            el.style.display = "block";
+            setTimeout(() => { el.style.display = "none"; }, 2500);
+        }
+
+        async function playScanSound() {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') await audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.frequency.setValueAtTime(1000, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+            } catch(e) {}
+        }
+
+        document.addEventListener("DOMContentLoaded", async () => {
+            await refreshUI();
+            if (navigator.onLine) {
+                syncRoster(true);
+            }
+        });
+
+        async function refreshUI() {
+            const studentCount = await db.students.count();
+            document.getElementById('status').innerText = studentCount > 0 
+                ? `DATABASE READY: ${studentCount} Students Loaded` 
+                : `⚠️ NO DATABASE LOADED. Fetch from Google Sheets or Upload CSV below.`;
+        }
+
+        function parseAndStoreCSV(csvText) {
+            return new Promise((resolve) => {
+                Papa.parse(csvText, {
+                    skipEmptyLines: true,
+                    complete: async function(results) {
+                        if (!results || !results.data || results.data.length < 2) {
+                            resolve(0);
+                            return;
+                        }
+
+                        const rows = results.data;
+                        const headers = rows[0].map(h => String(h || '').toLowerCase().trim());
+
+                        const lrnIdx = headers.findIndex(h => h.includes('lrn'));
+                        const nameIdx = headers.findIndex(h => h.includes('name'));
+                        const gradeIdx = headers.findIndex(h => h.includes('grade') || h.includes('level'));
+                        const secIdx = headers.findIndex(h => h.includes('section'));
+
+                        const students = [];
+                        for (let i = 1; i < rows.length; i++) {
+                            const r = rows[i];
+                            const lrn = lrnIdx !== -1 && r[lrnIdx] ? String(r[lrnIdx]).trim() : String(r[0] || '').trim();
+                            const name = nameIdx !== -1 && r[nameIdx] ? String(r[nameIdx]).trim() : String(r[1] || '').trim();
+                            const grade = gradeIdx !== -1 && r[gradeIdx] ? String(r[gradeIdx]).trim() : (r[2] ? String(r[2]).trim() : 'N/A');
+                            const sec = secIdx !== -1 && r[secIdx] ? String(r[secIdx]).trim() : (r[3] ? String(r[3]).trim() : 'N/A');
+
+                            if (lrn && lrn.toUpperCase() !== 'LRN' && name) {
+                                students.push({ LRN: lrn, Name: name, Grade: grade, Section: sec });
+                            }
+                        }
+
+                        if (students.length > 0) {
+                            await db.students.clear();
+                            await db.students.bulkPut(students);
+                            await refreshUI();
+                        }
+                        resolve(students.length);
+                    }
+                });
+            });
+        }
+
+        async function syncRoster(silent = false) {
+            if (!navigator.onLine) { 
+                if (!silent) showNotify("No Internet Connection. Please connect to sync."); 
+                return; 
+            }
+
+            clearDebug();
+            const btn = document.getElementById('syncRosterBtn');
+            if (btn) { btn.disabled = true; btn.innerText = "Syncing Roster... ⏳"; }
+
+            let loadedCount = 0;
+
+            // Strategy 1: CORS Proxy via corsproxy.io
+            try {
+                logDebug("Attempting Strategy 1 (corsproxy.io)...");
+                const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(DIRECT_CSV_URL)}`, { cache: "no-cache" });
+                const text = await res.text();
+                if (text.includes("<!DOCTYPE") || text.includes("<html")) {
+                    logDebug("Strategy 1 returned HTML (sheet may be restricted/unpublished).");
+                } else {
+                    loadedCount = await parseAndStoreCSV(text);
+                    if (loadedCount > 0) logDebug(`Strategy 1 Success: Loaded ${loadedCount} records.`);
+                }
+            } catch(e) {
+                logDebug("Strategy 1 failed: " + e.message);
+            }
+
+            // Strategy 2: CodeTabs Proxy
+            if (loadedCount === 0) {
+                try {
+                    logDebug("Attempting Strategy 2 (codetabs)...");
+                    const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(DIRECT_CSV_URL)}`, { cache: "no-cache" });
+                    const text = await res.text();
+                    if (!text.includes("<!DOCTYPE") && !text.includes("<html")) {
+                        loadedCount = await parseAndStoreCSV(text);
+                        if (loadedCount > 0) logDebug(`Strategy 2 Success: Loaded ${loadedCount} records.`);
+                    }
+                } catch(e) {
+                    logDebug("Strategy 2 failed: " + e.message);
+                }
+            }
+
+            // Finish up
+            if (btn) { btn.disabled = false; btn.innerText = "🔄 Fetch Latest Google Sheet Data"; }
+
+            if (loadedCount > 0) {
+                if (!silent) showNotify(`Successfully updated roster! Loaded ${loadedCount} students.`);
+            } else {
+                if (!silent) {
+                    showNotify("Unable to sync Google Sheet.\n\nMake sure your Google Sheet is set to 'File > Share > Publish to Web' with 'Require viewers to sign in' UNCHECKED.");
+                }
+            }
+        }
+
+        async function performSearch() {
+            const query = document.getElementById('nameInput').value.trim().toLowerCase();
+            const listDiv = document.getElementById('searchList');
+            listDiv.innerHTML = "";
+            if (query.length < 2) { quickShow("Enter at least 2 characters"); return; }
+            const matches = await db.students.filter(s => s.Name.toLowerCase().includes(query)).limit(20).toArray();
+            if (matches.length > 0) {
+                listDiv.style.display = 'block';
+                listDiv.innerHTML = matches.map(s => `
+                    <div class="search-item" onclick="selectStudent('${s.LRN}')">
+                        <strong>${s.Name}</strong><small>Grade ${s.Grade} - Section ${s.Section}</small>
+                    </div>`).join('') + `<button class="btn-secondary" style="padding:5px; font-size:10px; margin-top:5px;" onclick="closeSearchList()">Close Search</button>`;
+            } else { quickShow("No matches found"); }
+        }
+
+        function closeSearchList() { document.getElementById('searchList').style.display = 'none'; }
+
+        async function selectStudent(lrn) {
+            closeSearchList();
+            const student = await db.students.get(lrn);
+            if (student) {
+                playScanSound();
+                document.getElementById('nameText').innerText = student.Name;
+                document.getElementById('infoBadge').innerText = `Grade ${student.Grade} | Section ${student.Section}`;
+                document.getElementById('lrnText').innerText = student.LRN;
+                document.getElementById('scanResult').style.display = 'block';
+                
+                if (scanner && scanner.getState() === Html5QrcodeScannerState.SCANNING) {
+                    try { scanner.pause(true); } catch(e){}
+                }
+            } else {
+                quickShow("QR Code not found in database!");
+            }
+        }
+
+        function resetDisplay() {
+            document.getElementById('scanResult').style.display = 'none';
+            if (scanner && scanner.getState() === Html5QrcodeScannerState.PAUSED) {
+                try { scanner.resume(); } catch(e) { initScanner(); }
+            }
+        }
+
+        // --- CAMERA SCANNER LOGIC ---
+        async function initScanner() {
+            isScannerActive = true;
+            document.getElementById('startBtn').style.display = 'none';
+
+            if (scanner) {
+                try {
+                    await stopScanner();
+                    await scanner.clear();
+                } catch (e) {}
+                scanner = null;
+            }
+
+            scanner = new Html5Qrcode("reader");
+            const config = { fps: 15, qrbox: null };
+            
+            try {
+                await scanner.start(
+                    { facingMode: "environment" }, 
+                    config, 
+                    (text) => selectStudent(text.trim())
+                );
+            } catch (err) {
+                quickShow("Camera Error or Permission Denied"); 
+                document.getElementById('startBtn').style.display = 'block'; 
+                isScannerActive = false;
+            }
+        }
+
+        async function stopScanner() {
+            if (scanner) {
+                const state = scanner.getState();
+                if (state === Html5QrcodeScannerState.SCANNING || state === Html5QrcodeScannerState.PAUSED) {
+                    try { await scanner.stop(); } catch (e) {}
+                }
+            }
+        }
+
+        document.addEventListener('visibilitychange', async () => {
+            if (document.hidden) {
+                if (isScannerActive) { await stopScanner(); }
+            } else {
+                if (isScannerActive && document.getElementById('scanResult').style.display !== 'block') {
+                    setTimeout(initScanner, 300);
+                }
+            }
+        });
+
+        // --- LOCAL CSV FILE UPLOAD ---
+        function uploadCSV() {
+            const file = document.getElementById('csvFile').files[0];
+            if (!file) { quickShow("Select a CSV file first"); return; }
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const count = await parseAndStoreCSV(e.target.result);
+                if (count > 0) {
+                    quickShow(`Loaded ${count} students!`);
+                } else {
+                    quickShow("No valid students found in file.");
+                }
+            };
+            reader.readAsText(file);
+        }
+    </script>
+</body>
+</html>
